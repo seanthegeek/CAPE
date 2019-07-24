@@ -26,26 +26,31 @@ from lib.cuckoo.common.quarantine import unquarantine
 from lib.cuckoo.common.saztopcap import saz_to_pcap
 from lib.cuckoo.common.exceptions import CuckooDemuxError
 from lib.cuckoo.core.database import Database
-from lib.cuckoo.core.rooter import vpns
+from lib.cuckoo.core.rooter import vpns, socks5s
 from utils import submit_utils
-
-#try:
-#    # Tags
-#    from lib.cuckoo.common.dist_db import Machine, create_session
-#    HAVE_DIST = True
-#except Exception as e:
-HAVE_DIST = False
-#    print(e)
 
 # this required for hash searches
 FULL_DB = False
 repconf = Config("reporting")
+HAVE_DIST = False
+
+if repconf.distributed.enabled:
+    try:
+        # Tags
+        from lib.cuckoo.common.dist_db import Machine, create_session
+        HAVE_DIST = True
+    except Exception as e:
+        print(e)
+
+
 if repconf.mongodb.enabled:
     import pymongo
-    results_db = pymongo.MongoClient(
-                     repconf.mongodb.host,
-                     repconf.mongodb.port
-                 )[repconf.mongodb.db]
+    results_db = pymongo.MongoClient( repconf.mongodb.host,
+                                port=repconf.mongodb.port,
+                                username=repconf.mongodb.get("username", None),
+                                password=repconf.mongodb.get("password", None),
+                                authSource=repconf.mongodb.db
+                                )[repconf.mongodb.db]
     FULL_DB = True
 
 
@@ -81,17 +86,22 @@ def update_options(gw, orig_options):
 
 if HAVE_DIST:
     session = create_session(repconf.distributed.db)
+
 def load_vms_tags():
     all_tags = list()
-    if repconf.distributed.enabled:
+    if HAVE_DIST and repconf.distributed.enabled:
         try:
             db = session()
             for vm in db.query(Machine).all():
                 all_tags += vm.tags
             all_tags = sorted(filter(None, all_tags))
             db.close()
-        except exception as e:
+        except Exception as e:
             print(e)
+
+    for machine in Database().list_machines():
+        for tag in machine.tags:
+            all_tags.append(tag.name)
 
     return all_tags
 
@@ -214,6 +224,11 @@ def index(request, resubmit_hash=False):
             if options:
                 options += ","
             options += "norefer=1"
+
+        if request.POST.get("oldloader"):
+            if options:
+                options += ","
+            options += "loader=oldloader.exe,loader_64=oldloader_x64.exe"
 
         orig_options = options
 
@@ -421,6 +436,7 @@ def index(request, resubmit_hash=False):
             else:
                 base_dir = tempfile.mkdtemp(prefix='cuckoovtdl', dir=settings.VTDL_PATH)
                 hashlist = []
+                params = {}
                 if "," in vtdl:
                     hashlist = vtdl.replace(" ", "").strip().split(",")
                 else:
@@ -438,6 +454,7 @@ def index(request, resubmit_hash=False):
                         content = submit_utils.get_file_content(paths)
 
                     headers = {}
+                    params = {}
                     url = "https://www.virustotal.com/api/v3/files/{id}/download".format(id = h)
                     if settings.VTDL_PRIV_KEY:
                         headers = {'x-apikey': settings.VTDL_PRIV_KEY}
@@ -532,6 +549,7 @@ def index(request, resubmit_hash=False):
                                   {"packages": sorted(packages),
                                    "machines": machines,
                                    "vpns": vpns.values(),
+                                   "socks5s": socks5s.values(),
                                    "route": cfg.routing.route,
                                    "internet": cfg.routing.internet,
                                    "inetsim": cfg.routing.inetsim,
